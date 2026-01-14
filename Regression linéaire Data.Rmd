@@ -1,0 +1,861 @@
+# ============================================================================
+# APPLICATION SHINY - PROJET INONDATIONS (3 MODÈLES)
+# Projet Data Science DaMS4 - Polytech Montpellier
+# Janvier 2026
+# ============================================================================
+
+library(shiny)
+library(shinydashboard)
+library(DT)
+library(plotly)
+library(dplyr)
+library(ggplot2)
+library(MASS)
+
+# ============================================================================
+# CHARGEMENT DES DONNÉES
+# ============================================================================
+
+charger_donnees <- function() {
+  
+  # Vérifier si les fichiers existent
+  if (file.exists("data/extracted.csv") && file.exists("data/data_Y.csv")) {
+    
+    cat("Chargement des données réelles...\n")
+    
+    # Charger X (variables explicatives/entrées) - 44 colonnes
+    X <- read.csv("data/extracted.csv", stringsAsFactors = FALSE)
+    cat("✓ extracted.csv chargé:", nrow(X), "lignes x", ncol(X), "colonnes\n")
+    
+    # Charger Y (variables à prédire/sorties) - SMax
+    Y <- read.csv("data/data_Y.csv", stringsAsFactors = FALSE)
+    cat("✓ data_Y.csv chargé:", nrow(Y), "lignes x", ncol(Y), "colonnes\n")
+    
+    # Fusionner X et Y par scenario_id
+    # X a "scenario_id", Y a "sc" qui correspondent
+    if (nrow(X) == nrow(Y)) {
+      # Ajouter SMax à X
+      df <- X
+      df$SMax <- Y$SMax
+      cat("✓ Données combinées:", nrow(df), "lignes x", ncol(df), "colonnes\n")
+      cat("✓ Variable cible: SMax (Surface maximale inondée)\n")
+    } else {
+      stop("ERREUR: X et Y n'ont pas le même nombre de lignes!")
+    }
+    
+  } else {
+    # Si les fichiers n'existent pas, utiliser des données d'exemple
+    warning("Fichiers extracted.csv ou data_Y.csv introuvables. Utilisation de données d'exemple.")
+    df <- generer_donnees_exemple()
+  }
+  
+  return(df)
+}
+
+generer_donnees_exemple <- function() {
+  set.seed(2026)
+  n <- 250
+  
+  df <- data.frame(
+    scenario_id = 1:n,
+    hauteur_maree = rnorm(n, mean = 5, sd = 1.5),
+    niveau_mer = rnorm(n, mean = 50, sd = 10),
+    debit_fleuve = runif(n, min = 100, max = 500),
+    precipitation = runif(n, min = 0, max = 100),
+    vent_vitesse = runif(n, min = 0, max = 80),
+    hauteur_max = abs(rnorm(n, mean = 2.5, sd = 1)),
+    surface_max = abs(rnorm(n, mean = 150000, sd = 50000)),
+    date_simulation = seq(as.Date("2024-01-01"), by = "day", length.out = n),
+    zone = sample(c("Centre-ville", "Zone côtière", "Zone rurale"), n, replace = TRUE)
+  )
+  
+  return(df)
+}
+
+# Charger les données au démarrage
+donnees_brutes <- charger_donnees()
+
+# ============================================================================
+# INTERFACE UTILISATEUR (UI)
+# ============================================================================
+
+ui <- dashboardPage(
+  
+  skin = "blue",
+  
+  dashboardHeader(
+    title = "Modélisation des inondations côtières à Gâvres (France)",
+    titleWidth = 350
+  ),
+  
+  dashboardSidebar(
+    width = 250,
+    sidebarMenu(
+      menuItem("Accueil", tabName = "accueil"),
+      menuItem("Données", tabName = "donnees"),
+      menuItem("Modèle 1", tabName = "modele1"),
+      menuItem("Modèle 2", tabName = "modele2"),
+      menuItem("Modèle 3", tabName = "modele3"),
+      menuItem("Comparaison", tabName = "comparaison")
+    )
+  ),
+  
+  dashboardBody(
+    
+    tags$head(
+      tags$style(HTML("
+        .box { border-radius: 5px; }
+        .small-box { border-radius: 5px; }
+      "))
+    ),
+    
+    tabItems(
+      
+      # ========== ONGLET ACCUEIL ==========
+      tabItem(
+        tabName = "accueil",
+        
+        h2("Projet : Modélisation des Inondations Côtières"),
+        
+        fluidRow(
+          box(
+            title = "Contexte du projet",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            h4("Objectif"),
+            p("Développer et comparer 3 métamodèles capables de prédire les inondations 
+              côtières avec précision tout en réduisant le temps de calcul."),
+            hr(),
+            h4(" Équipe"),
+            p("Groupe : Benali Syrine, Matmar Lysa, Pinta Sébastien, Malek Jamel"),
+            hr(),
+            h4(" Données"),
+            p("Fichiers chargés :"),
+            tags$ul(
+              tags$li(strong("extracted.csv :"), "250 scénarios avec 44 variables explicatives"),
+              tags$li(strong("data_Y.csv :"), "Surface maximale inondée (SMax) pour chaque scénario")
+            ),
+            tags$p(strong("Variables principales :"), "U (vent), Hs (hauteur vagues), Tp (période vagues), 
+                   NM (niveau mer), T (marée), et leurs dérivées statistiques"),
+            hr(),
+            h4("Objectifs"),
+            tags$ol(
+              tags$li("Explorer et visualiser les 44 features extraites"),
+              tags$li("Implémenter 3 méthodes de modélisation pour prédire SMax"),
+              tags$li("Comparer leurs performances (RMSE, R², MAE)"),
+              tags$li("Identifier la meilleure approche pour prédire la surface inondée")
+            )
+          )
+        ),
+        
+        fluidRow(
+          valueBoxOutput("vbox_scenarios", width = 4),
+          valueBoxOutput("vbox_variables", width = 4),
+          valueBoxOutput("vbox_targets", width = 4)
+        )
+      ),
+      
+      # ========== ONGLET DONNÉES ==========
+      tabItem(
+        tabName = "donnees",
+        
+        h2("Exploration des données"),
+        
+        fluidRow(
+          box(
+            title = "Statistiques descriptives",
+            status = "info",
+            solidHeader = TRUE,
+            width = 12,
+            DTOutput("table_stats")
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Variables X (Entrées)",
+            status = "info",
+            solidHeader = TRUE,
+            width = 6,
+            DTOutput("table_X")
+          ),
+          box(
+            title = "Variables Y (Sorties)",
+            status = "success",
+            solidHeader = TRUE,
+            width = 6,
+            DTOutput("table_Y")
+          )
+        ),
+      ),
+      
+      # ========== ONGLET MODÈLE 1 (RÉGRESSION LINÉAIRE) ==========
+      tabItem(
+        tabName = "modele1",
+        
+        h2("Modèle 1 : Régression Linéaire (Backward Selection)"),
+        
+    
+        fluidRow(
+          # Boîte de Configuration
+          box(
+            title = "Configuration",
+            status = "primary", solidHeader = TRUE, width = 4,
+            tags$ul(
+              tags$li("Split : 80% Entraînement / 20% Test"),
+              tags$li("Seed : 123 (Fixé)"),
+              tags$li("Sélection : Backward AIC"),
+              tags$li("Nettoyage : Suppression des constantes & fuites")
+            ),
+            br(),
+            actionButton("run_m1", "Lancer le calcul", class = "btn-primary btn-lg btn-block")
+          ),
+          box(
+            title = "Résultats Clés",
+            status = "primary", solidHeader = TRUE, width = 8,
+            fluidRow(
+              column(5, 
+                     h4("Métriques (sur Test)"),
+                     tableOutput("metrics_m1")
+              ),
+              column(7,
+                     h4("Variables Retenues"),
+                     uiOutput("vars_m1"), 
+                     hr()
+              )
+            )
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "1. Observed vs Predicted (Jeu de Test)",
+            status = "success", solidHeader = TRUE, width = 8,
+            plotOutput("plot_obs_pred", height = "400px")
+          ),
+        ),
+        
+        # --- LIGNE 3 : DIAGNOSTICS (RESIDUS & QQ) ---
+        fluidRow(
+          # Residuals vs Fitted
+          box(
+            title = "2. Residuals vs Fitted (Global)",
+            status = "info", solidHeader = TRUE, width = 6,
+            plotOutput("plot_res_fit", height = "350px")
+           
+          ),
+          
+          # Normal Q-Q Plot
+          box(
+            title = "3. Normal Q-Q Plot (Global)",
+            status = "info", solidHeader = TRUE, width = 6,
+            plotOutput("plot_qq", height = "350px")
+          )
+        ),
+      ),
+      
+      # ========== ONGLET MODÈLE 2 ==========
+      tabItem(
+        tabName = "modele2",
+        
+        h2("Méthode 2 : [Nom de votre 2ème méthode]"),
+        
+        fluidRow(
+          box(
+            title = "Configuration",
+            status = "warning",
+            solidHeader = TRUE,
+            width = 4,
+            p("Exemple : Random Forest, SVM, etc."),
+            selectInput("m2_target", "Variable Y à prédire :", choices = NULL),
+            sliderInput("m2_train_pct", "% Données d'entraînement :",
+                        min = 60, max = 90, value = 70, step = 5),
+            sliderInput("m2_param1", "Paramètre 1 :",
+                        min = 1, max = 20, value = 5),
+            hr(),
+            actionButton("m2_run", "🚀 Lancer le modèle", 
+                         class = "btn-warning btn-block")
+          ),
+          box(
+            title = "Résultats",
+            status = "warning",
+            solidHeader = TRUE,
+            width = 8,
+            verbatimTextOutput("m2_summary"),
+            hr(),
+            h4("Métriques de performance"),
+            tableOutput("m2_metrics")
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Valeurs prédites vs réelles",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("m2_pred_plot", height = "400px")
+          ),
+          box(
+            title = "Résidus",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("m2_residuals", height = "400px")
+          )
+        )
+      ),
+      
+      # ========== ONGLET MODÈLE 3 ==========
+      tabItem(
+        tabName = "modele3",
+        
+        h2("Méthode 3 : [Nom de votre 3ème méthode]"),
+        
+        fluidRow(
+          box(
+            title = "Configuration",
+            status = "danger",
+            solidHeader = TRUE,
+            width = 4,
+            p("Exemple : XGBoost, Réseaux de neurones, etc."),
+            selectInput("m3_target", "Variable Y à prédire :", choices = NULL),
+            sliderInput("m3_train_pct", "% Données d'entraînement :",
+                        min = 60, max = 90, value = 70, step = 5),
+            sliderInput("m3_param1", "Paramètre 1 :",
+                        min = 1, max = 50, value = 10),
+            sliderInput("m3_param2", "Paramètre 2 :",
+                        min = 0.01, max = 1, value = 0.1, step = 0.01),
+            hr(),
+            actionButton("m3_run", "🚀 Lancer le modèle", 
+                         class = "btn-danger btn-block")
+          ),
+          box(
+            title = "Résultats",
+            status = "danger",
+            solidHeader = TRUE,
+            width = 8,
+            verbatimTextOutput("m3_summary"),
+            hr(),
+            h4("Métriques de performance"),
+            tableOutput("m3_metrics")
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Valeurs prédites vs réelles",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("m3_pred_plot", height = "400px")
+          ),
+          box(
+            title = "Résidus",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("m3_residuals", height = "400px")
+          )
+        )
+      ),
+      
+      # ========== ONGLET COMPARAISON ==========
+      tabItem(
+        tabName = "comparaison",
+        
+        h2("Comparaison des 3 méthodes"),
+        
+        fluidRow(
+          box(
+            title = "Performance des modèles - R²",
+            status = "info",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("plot_comparison_r2", height = "350px")
+          ),
+          box(
+            title = "Performance des modèles - RMSE",
+            status = "info",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("plot_comparison_rmse", height = "350px")
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Tableau récapitulatif complet",
+            status = "warning",
+            solidHeader = TRUE,
+            width = 8,
+            DTOutput("table_comparison")
+          ),
+          box(
+            title = "Conclusion",
+            status = "success",
+            solidHeader = TRUE,
+            width = 4,
+            h4("🏆 Meilleure méthode :"),
+            verbatimTextOutput("best_method"),
+            hr(),
+            h4("📊 Points clés :"),
+            htmlOutput("key_points")
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Comparaison visuelle des prédictions",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("plot_comparison_predictions", height = "400px")
+          )
+        )
+      )
+    )
+  )
+)
+
+# ============================================================================
+# LOGIQUE SERVEUR
+# ============================================================================
+
+server <- function(input, output, session) {
+  
+  # --- Données réactives ---
+  donnees <- reactive({
+    donnees_brutes
+  })
+  
+  # Identifier les colonnes X et Y
+  colonnes_info <- reactive({
+    df <- donnees()
+    
+    # Pour vos données réelles
+    # Y = SMax (la variable à prédire)
+    # X = toutes les autres variables numériques sauf scenario_id
+    
+    Y_names <- c("SMax")
+    
+    # Variables X = toutes les variables numériques sauf scenario_id et SMax
+    all_numeric <- names(df)[sapply(df, is.numeric)]
+    X_names <- setdiff(all_numeric, c("scenario_id", "SMax"))
+    
+    list(X = X_names, Y = Y_names)
+  })
+  
+  # Mettre à jour les choix de variables
+  observe({
+    cols <- colonnes_info()
+    
+    # Pour les analyses
+    updateSelectInput(session, "var_x_ana", choices = cols$X)
+    updateSelectInput(session, "var_y_ana", choices = cols$Y)
+    updateSelectInput(session, "couleur_ana", choices = c("Aucune", names(donnees())))
+    
+    # Pour la distribution Y
+    updateSelectInput(session, "var_y_dist", choices = cols$Y)
+    
+    # Pour les modèles
+    updateSelectInput(session, "m1_target", choices = cols$Y)
+    updateSelectInput(session, "m2_target", choices = cols$Y)
+    updateSelectInput(session, "m3_target", choices = cols$Y)
+    
+    updateCheckboxGroupInput(session, "m1_vars", choices = cols$X, selected = cols$X)
+  })
+  
+  # ========== ONGLET ACCUEIL ==========
+  
+  output$vbox_scenarios <- renderValueBox({
+    valueBox(
+      value = nrow(donnees()),
+      subtitle = "Scénarios d'inondation",
+      icon = icon("water"),
+      color = "blue"
+    )
+  })
+  
+  output$vbox_variables <- renderValueBox({
+    cols <- colonnes_info()
+    valueBox(
+      value = length(cols$X),
+      subtitle = "Features extraites (Variables X)",
+      icon = icon("list"),
+      color = "green"
+    )
+  })
+  
+  output$vbox_targets <- renderValueBox({
+    df <- donnees()
+    moy <- mean(df$SMax, na.rm = TRUE)
+    valueBox(
+      value = paste(round(moy/1000, 1), "k m²"),
+      subtitle = "Surface moyenne inondée",
+      icon = icon("water"),
+      color = "yellow"
+    )
+  })
+  
+  # ========== ONGLET DONNÉES ==========
+  
+  output$table_stats <- renderDT({
+    df <- donnees()
+    
+    stats <- data.frame(
+      Variable = names(df),
+      Type = sapply(df, function(x) class(x)[1]),
+      N = nrow(df),
+      NA_count = sapply(df, function(x) sum(is.na(x))),
+      Min = sapply(df, function(x) if(is.numeric(x)) round(min(x, na.rm=TRUE), 2) else NA),
+      Moyenne = sapply(df, function(x) if(is.numeric(x)) round(mean(x, na.rm=TRUE), 2) else NA),
+      Max = sapply(df, function(x) if(is.numeric(x)) round(max(x, na.rm=TRUE), 2) else NA)
+    )
+    
+    datatable(stats, options = list(pageLength = 15, scrollX = TRUE))
+  })
+  
+  output$table_X <- renderDT({
+    cols <- colonnes_info()
+    df <- donnees()[, cols$X, drop = FALSE]
+    datatable(head(df, 50), options = list(pageLength = 10, scrollX = TRUE))
+  })
+  
+  output$table_Y <- renderDT({
+    cols <- colonnes_info()
+    df <- donnees()[, cols$Y, drop = FALSE]
+    datatable(head(df, 50), options = list(pageLength = 10, scrollX = TRUE))
+  })
+  
+  output$plot_na <- renderPlotly({
+    df <- donnees()
+    na_counts <- colSums(is.na(df))
+    
+    plot_ly(x = names(na_counts), y = na_counts, type = "bar",
+            marker = list(color = "#f39c12")) %>%
+      layout(title = "Nombre de valeurs manquantes par variable",
+             xaxis = list(title = ""),
+             yaxis = list(title = "Nombre de NA"))
+  })
+  
+  output$plot_y_dist <- renderPlotly({
+    req(input$var_y_dist)
+    df <- donnees()
+    
+    plot_ly(x = df[[input$var_y_dist]], type = "histogram", nbinsx = 30,
+            marker = list(color = "#3498db")) %>%
+      layout(title = paste("Distribution de", input$var_y_dist),
+             xaxis = list(title = input$var_y_dist),
+             yaxis = list(title = "Fréquence"))
+  })
+  
+  # ========== MODÈLE 1 ===========
+  
+  results_m1 <- eventReactive(input$run_m1, {
+    
+    # ----------------------------
+    # 1. CHARGEMENT & FUSION 
+    # ----------------------------
+    X <- read.csv("data/extracted.csv")
+    Y <- read.csv("data/data_Y.csv")
+    
+    # Jointure par scenario_id = sc
+    data_merged <- inner_join(X, Y, by = c("scenario_id" = "sc"))
+    
+    # ----------------------------
+    # 2. NETTOYAGE 
+    # ----------------------------
+    # Supprimer scenario_id, S_max et S_mean (comme dans le RMarkdown)
+    cols_to_remove <- c("scenario_id", "S_max", "S_mean")
+    data_prep <- data_merged[, !(names(data_merged) %in% cols_to_remove)]
+    
+    # Suppression des colonnes constantes (écart-type = 0)
+    col_stds <- sapply(data_prep, sd, na.rm = TRUE)
+    data_clean <- data_prep[, col_stds > 0]
+    
+    # S'assurer que SMax est bien présent
+    if (!"SMax" %in% names(data_clean)) {
+      data_clean$SMax <- data_prep$SMax
+    }
+    
+    # ----------------------------
+    # 3. STANDARDISATION 
+    # ----------------------------
+    data_scaled <- data_clean
+    target_idx <- which(names(data_clean) == "SMax")
+    # Standardiser toutes les colonnes SAUF SMax
+    data_scaled[, -target_idx] <- scale(data_clean[, -target_idx])
+    
+    # ----------------------------
+    # 4. SPLIT 80 / 20 (SEED 123) 
+    # ----------------------------
+    set.seed(123) 
+    index <- sample(1:nrow(data_scaled), round(0.8 * nrow(data_scaled)))
+    train_data <- data_scaled[index, ]
+    test_data  <- data_scaled[-index, ]
+    
+    # ----------------------------
+    # 5. MODELE + BACKWARD
+    # ----------------------------
+    model_full <- lm(SMax ~ ., data = train_data)
+    model_final <- step(model_full, direction = "backward", trace = 0)
+    
+    # ----------------------------
+    # 6. CALCULS POUR LES METRIQUES 
+    # ----------------------------
+    test_data$pred <- predict(model_final, newdata = test_data)
+    rss <- sum((test_data$pred - test_data$SMax)^2)
+    tss <- sum((test_data$SMax - mean(test_data$SMax))^2)
+    r2_test <- 1 - (rss/tss)
+    
+    rmse_test <- sqrt(mean((test_data$SMax - test_data$pred)^2))
+    mae_test <- mean(abs(test_data$SMax - test_data$pred))
+    
+    # ----------------------------
+    # 7. CALCULS POUR LES GRAPHES 2 & 3 
+    # ----------------------------
+    data_scaled$pred <- predict(model_final, newdata = data_scaled)
+    data_scaled$residus <- data_scaled$SMax - data_scaled$pred
+    
+    list(
+      model = model_final,
+      r2 = r2_test,
+      rmse = rmse_test,
+      mae = mae_test,
+      # Données pour Graphe 1 
+      obs_test = test_data$SMax,
+      pred_test = test_data$pred,
+      # Données pour Graphes 2 & 3 
+      pred_full = data_scaled$pred,
+      residus_full = data_scaled$residus
+    )
+  })
+  
+  # ==========================================================================
+  # OUTPUTS
+  # ==========================================================================
+  
+  output$metrics_m1 <- renderTable({
+    res <- results_m1()
+    data.frame(
+      Métrique = c("R² (Test)", "RMSE", "MAE"),
+      Valeur = c(round(res$r2, 4), round(res$rmse, 0), round(res$mae, 0))
+    )
+  })
+  
+  output$vars_m1 <- renderUI({
+    res <- results_m1()
+    vars <- names(coef(res$model))[-1]
+    HTML(paste0("<b>Variables retenues (", length(vars), ") :</b><br>", paste(vars, collapse = ", ")))
+  })
+  
+  # GRAPHE 1 : Obs vs Pred 
+  output$plot_obs_pred <- renderPlot({
+    res <- results_m1()
+    ggplot(data.frame(Obs = res$obs_test, Pred = res$pred_test), aes(Obs, Pred)) +
+      geom_point(alpha = 0.7, color = "steelblue") +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+      labs(title = paste("Observed vs Predicted (Test) – R² =", round(res$r2, 3)),
+           x = "Réalité (Test)", y = "Prédiction (Test)") +
+      theme_minimal()
+  })
+  
+  # GRAPHE 2 : Residuals vs Fitted 
+  output$plot_res_fit <- renderPlot({
+    res <- results_m1()
+    ggplot(data.frame(Fitted = res$pred_full, Res = res$residus_full), aes(Fitted, Res)) +
+      geom_point(alpha = 0.5, color = "darkgreen") +
+      geom_hline(yintercept = 0, color = "red") +
+      geom_smooth(method = "loess", se = FALSE, color = "orange") +
+      labs(title = "Residuals vs Fitted (Global)", x = "Valeurs Prédites", y = "Résidus") +
+      theme_minimal()
+  })
+  
+  # GRAPHE 3 : QQ Plot 
+  output$plot_qq <- renderPlot({
+    res <- results_m1()
+    ggplot(data.frame(res = res$residus_full), aes(sample = res)) +
+      stat_qq(color = "purple", alpha = 0.5) +
+      stat_qq_line(color = "red") +
+      labs(title = "Normal Q-Q Plot (Global)", x = "Théorique", y = "Echantillon") +
+      theme_minimal()
+  })
+  
+  # ========== MODÈLE 2 ==========
+  
+  resultats_m2 <- eventReactive(input$m2_run, {
+    # Simulé pour l'instant - À REMPLACER par votre vraie méthode
+    list(
+      rmse = runif(1, 5000, 15000),
+      r2 = runif(1, 0.70, 0.90),
+      mae = runif(1, 3000, 10000)
+    )
+  })
+  
+  output$m2_summary <- renderPrint({
+    cat("Méthode 2 : [À implémenter]\n")
+    cat("Paramètre 1 :", input$m2_param1, "\n")
+  })
+  
+  output$m2_metrics <- renderTable({
+    res <- resultats_m2()
+    data.frame(
+      Métrique = c("RMSE", "R²", "MAE"),
+      Valeur = c(round(res$rmse, 3), round(res$r2, 3), round(res$mae, 3))
+    )
+  })
+  
+  output$m2_pred_plot <- renderPlotly({
+    plot_ly(x = rnorm(50), y = rnorm(50), type = "scatter", mode = "markers") %>%
+      layout(title = "Modèle 2: À implémenter")
+  })
+  
+  output$m2_residuals <- renderPlotly({
+    plot_ly(y = rnorm(50), type = "scatter", mode = "markers") %>%
+      layout(title = "Modèle 2: À implémenter")
+  })
+  
+  # ========== MODÈLE 3 ==========
+  
+  resultats_m3 <- eventReactive(input$m3_run, {
+    # Simulé pour l'instant - À REMPLACER par votre vraie méthode
+    list(
+      rmse = runif(1, 5000, 15000),
+      r2 = runif(1, 0.75, 0.95),
+      mae = runif(1, 3000, 10000)
+    )
+  })
+  
+  output$m3_summary <- renderPrint({
+    cat("Méthode 3 : [À implémenter]\n")
+    cat("Paramètre 1 :", input$m3_param1, "\n")
+    cat("Paramètre 2 :", input$m3_param2, "\n")
+  })
+  
+  output$m3_metrics <- renderTable({
+    res <- resultats_m3()
+    data.frame(
+      Métrique = c("RMSE", "R²", "MAE"),
+      Valeur = c(round(res$rmse, 3), round(res$r2, 3), round(res$mae, 3))
+    )
+  })
+  
+  output$m3_pred_plot <- renderPlotly({
+    plot_ly(x = rnorm(50), y = rnorm(50), type = "scatter", mode = "markers") %>%
+      layout(title = "Modèle 3: À implémenter")
+  })
+  
+  output$m3_residuals <- renderPlotly({
+    plot_ly(y = rnorm(50), type = "scatter", mode = "markers") %>%
+      layout(title = "Modèle 3: À implémenter")
+  })
+  
+  # ========== COMPARAISON DES 3 MODÈLES ==========
+  
+  output$plot_comparison_r2 <- renderPlotly({
+    # Récupérer les résultats (avec valeurs par défaut si pas encore lancés)
+    r2_m1 <- tryCatch(results_m1()$r2, error = function(e) 0)
+    r2_m2 <- tryCatch(resultats_m2()$r2, error = function(e) 0)
+    r2_m3 <- tryCatch(resultats_m3()$r2, error = function(e) 0)
+    
+    df_comp <- data.frame(
+      Méthode = c("Méthode 1", "Méthode 2", "Méthode 3"),
+      R2 = c(r2_m1, r2_m2, r2_m3)
+    )
+    
+    plot_ly(df_comp, x = ~Méthode, y = ~R2, type = "bar",
+            marker = list(color = c("#27ae60", "#f39c12", "#e74c3c"))) %>%
+      layout(title = "Comparaison R² (plus élevé = meilleur)",
+             yaxis = list(title = "R²", range = c(0, 1)))
+  })
+  
+  output$plot_comparison_rmse <- renderPlotly({
+    rmse_m1 <- tryCatch(results_m1()$rmse, error = function(e) 0)
+    rmse_m2 <- tryCatch(resultats_m2()$rmse, error = function(e) 0)
+    rmse_m3 <- tryCatch(resultats_m3()$rmse, error = function(e) 0)
+    
+    df_comp <- data.frame(
+      Méthode = c("Méthode 1", "Méthode 2", "Méthode 3"),
+      RMSE = c(rmse_m1, rmse_m2, rmse_m3)
+    )
+    
+    plot_ly(df_comp, x = ~Méthode, y = ~RMSE, type = "bar",
+            marker = list(color = c("#27ae60", "#f39c12", "#e74c3c"))) %>%
+      layout(title = "Comparaison RMSE (plus faible = meilleur)",
+             yaxis = list(title = "RMSE"))
+  })
+  
+  output$table_comparison <- renderDT({
+    r2_m1 <- tryCatch(results_m1()$r2, error = function(e) NA)
+    r2_m2 <- tryCatch(resultats_m2()$r2, error = function(e) NA)
+    r2_m3 <- tryCatch(resultats_m3()$r2, error = function(e) NA)
+    
+    rmse_m1 <- tryCatch(results_m1()$rmse, error = function(e) NA)
+    rmse_m2 <- tryCatch(resultats_m2()$rmse, error = function(e) NA)
+    rmse_m3 <- tryCatch(resultats_m3()$rmse, error = function(e) NA)
+    
+    mae_m1 <- tryCatch(results_m1()$mae, error = function(e) NA)
+    mae_m2 <- tryCatch(resultats_m2()$mae, error = function(e) NA)
+    mae_m3 <- tryCatch(resultats_m3()$mae, error = function(e) NA)
+    
+    df_comp <- data.frame(
+      Méthode = c("Méthode 1", "Méthode 2", "Méthode 3"),
+      R2 = round(c(r2_m1, r2_m2, r2_m3), 3),
+      RMSE = round(c(rmse_m1, rmse_m2, rmse_m3), 2),
+      MAE = round(c(mae_m1, mae_m2, mae_m3), 2),
+      check.names = FALSE
+    )
+    
+    datatable(df_comp, options = list(dom = 't')) %>%
+      formatStyle('R²', backgroundColor = styleInterval(c(0.8, 0.9), c('white', '#d4edda', '#28a745'))) %>%
+      formatStyle('RMSE', backgroundColor = styleInterval(c(10000, 15000), c('#28a745', '#d4edda', 'white')))
+  })
+  
+  output$best_method <- renderText({
+    r2_m1 <- tryCatch(results_m1()$r2, error = function(e) 0)
+    r2_m2 <- tryCatch(resultats_m2()$r2, error = function(e) 0)
+    r2_m3 <- tryCatch(resultats_m3()$r2, error = function(e) 0)
+    
+    r2_vals <- c(r2_m1, r2_m2, r2_m3)
+    best <- which.max(r2_vals)
+    
+    paste("Méthode", best, "(R² =", round(r2_vals[best], 3), ")")
+  })
+  
+  output$key_points <- renderUI({
+    HTML("
+      <ul>
+        <li>Lancez les 3 modèles pour voir la comparaison</li>
+        <li>Le meilleur modèle est celui avec le R² le plus élevé</li>
+        <li>Vérifiez aussi le RMSE (plus faible = meilleur)</li>
+      </ul>
+    ")
+  })
+  
+  output$plot_comparison_predictions <- renderPlotly({
+    # Graphique combiné des prédictions (si Modèle 1 est lancé)
+    res <- tryCatch(results_m1(), error = function(e) NULL)
+    if(!is.null(res)) {
+      plot_ly(x = res$obs_test, y = res$pred_test,
+              type = "scatter", mode = "markers",
+              name = "Modèle 1",
+              marker = list(size = 8, opacity = 0.6)) %>%
+        add_trace(x = range(res$obs_test),
+                  y = range(res$obs_test),
+                  type = "scatter", mode = "lines",
+                  line = list(color = "red", dash = "dash"),
+                  name = "Parfait") %>%
+        layout(title = "Comparaison visuelle des prédictions",
+               xaxis = list(title = "Valeurs réelles"),
+               yaxis = list(title = "Valeurs prédites"))
+    } else {
+      plot_ly() %>%
+        layout(title = "Lancez au moins un modèle pour voir les prédictions")
+    }
+  })
+  
+}
+
+shinyApp(ui = ui, server = server)
